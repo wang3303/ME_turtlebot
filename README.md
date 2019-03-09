@@ -1,6 +1,6 @@
-# asl_turtlebot
+# me_turtlebot
 
-This is the PROJECT branch of the asl_turtlebot repo. This contains a _starting point_ for your final project. There are some files overlapping with those existing in the MASTER branch, but this branch is meant to be an organized collection of files for your project and works in isolation. Below are _brief_ descriptions of the code. You are strongly encouraged to take a closer look into the code for more details of how and what the code does.
+This is the PROJECT branch of the me_turtlebot repo. This contains a _starting point_ for your final project. There are some files overlapping with those existing in the MASTER branch, but this branch is meant to be an organized collection of files for your project and works in isolation. Below are _brief_ descriptions of the code. You are strongly encouraged to take a closer look into the code for more details of how and what the code does.
 
 **File Descriptions:**
 
@@ -10,7 +10,7 @@ launch/project_sim_pose.launch: Launches gazebo with a (rough, tentative) model 
 
 launch/project_sim_nav.launch: Launches gazebo with a (rough, tentative) model of the final project environment. Uses navigator.py but you will need to add your implementation of astar.py for this to work. It goes to /cmd_nav by computing a path.
 
-robots/asl_turtlebot.urdf.xacro, turtlebot3_burger.gazebo.xacro, turtlebot3_burger.urdf.xacro: Turtlebot 3D model definitions for gazebo. 
+robots/me_turtlebot.urdf.xacro, turtlebot3_burger.gazebo.xacro, turtlebot3_burger.urdf.xacro: Turtlebot 3D model definitions for gazebo. 
 
 world/project_city.world: Defines 3D model of rough, tentative representation of the final project environment.
 
