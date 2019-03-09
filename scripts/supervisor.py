@@ -8,6 +8,9 @@ from me_turtlebot.msg import DetectedObject
 import tf
 import math
 from enum import Enum
+from visualization_msgs.msg import Marker
+from geometry_msgs.msg import Quaternion, Pose, Point, Vector3
+from std_msgs.msg import Header, ColorRGBA
 
 # if sim is True/using gazebo, therefore want to subscribe to /gazebo/model_states\
 # otherwise, they will use a TF lookup (hw2+)
@@ -61,18 +64,34 @@ class Supervisor:
         self.nav_goal_publisher = rospy.Publisher('/cmd_nav', Pose2D, queue_size=10)
         # command vel (used for idling)
         self.cmd_vel_publisher = rospy.Publisher('/cmd_vel', Twist, queue_size=10)
+        # visualize robot in rviz
+        self.rviz_state_publisher = rospy.Publisher('rviz_turtle_state', Marker, queue_size=5)
 
         # subscribers
         # stop sign detector
         rospy.Subscriber('/detector/stop_sign', DetectedObject, self.stop_sign_detected_callback)
         # high-level navigation pose
-        rospy.Subscriber('/nav_pose', Pose2D, self.nav_pose_callback)
+        rospy.Subscriber('/', Pose2D, self.nav_pose_callback)
         # if using gazebo, we have access to perfect state
         if use_gazebo:
             rospy.Subscriber('/gazebo/model_states', ModelStates, self.gazebo_callback)
         # we can subscribe to nav goal click
         rospy.Subscriber('/move_base_simple/goal', PoseStamped, self.rviz_goal_callback)
-        
+
+
+    def rviz_turtlebot_state(self):
+        origin_frame = "/map" if mapping else "/odom"
+        marker = Marker(
+                type=Marker.CYLINDER,
+                id=0,
+                lifetime=rospy.Duration(1.),
+                pose=Pose(Point(self.x, self.y, 0.0), Quaternion(0, 0, 0, 1)),
+                scale=Vector3(0.2, 0.2, 0.2),
+                header=Header(frame_id=origin_frame, stamp=rospy.Time.now()),
+                color=ColorRGBA(0.0, 1.0, 0.0, 0.8),
+            )
+        self.rviz_state_publisher.publish(marker)
+
     def gazebo_callback(self, msg):
         pose = msg.pose[msg.name.index("turtlebot3_burger")]
         twist = msg.twist[msg.name.index("turtlebot3_burger")]
@@ -191,7 +210,8 @@ class Supervisor:
                 self.theta = euler[2]
             except (tf.LookupException, tf.ConnectivityException, tf.ExtrapolationException):
                 pass
-
+        # visualize current state
+        self.rviz_turtlebot_state()
         # logs the current mode
         if not(self.last_mode_printed == self.mode):
             rospy.loginfo("Current Mode: %s", self.mode)
