@@ -136,6 +136,8 @@ class Supervisor:
         rospy.loginfo('Receiving request!')
         self.food_to_get = msg.data.split(',')
         self.phaseI = False
+        goal, name = self.construct_goal_lists()
+        self.goal_list, self.goal_name = goal, name
 
     def pickup_callback(self, msg):
         if self.mode == Mode.WAIT_FOR_ORDER:
@@ -170,11 +172,13 @@ class Supervisor:
             self.init_stop_sign()
 
     def construct_goal_lists(self,):
-        res = []
+        name, goal = self.goal_name, self.goal_list
         # for i in range(len())
         #     idx =
-        #     res.append(self.goal_list)
-        return res
+        #     name.append(self.goal_list[idx])
+        #     goal.append(self.goal_name[idx])
+        # TODO: modify the goal list after receiving the request
+        return name, goal
 
     def vendor_detected_callback(self, msg):
         """ callback for when the detector has found an vendor. Note that
