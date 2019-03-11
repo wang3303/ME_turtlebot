@@ -1,0 +1,10 @@
+<launch>
+  <rosparam param="sim">false</rosparam>
+  <rosparam param="map">true</rosparam>
+  
+  <node pkg="me_turtlebot" type="navigator.py" name="turtlebot_navigator" />
+  <node pkg="me_turtlebot" type="pose_controller.py" name="turtlebot_pose_controller" />
+  <node pkg="me_turtlebot" type="supervisor_project.py" name="supervisor_project" />
+
+  <node name="rviz" pkg="rviz" type="rviz" args="-d $(find me_turtlebot)/rviz/project_sim.rviz"/>
+</launch>
