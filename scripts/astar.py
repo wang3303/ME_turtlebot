@@ -102,6 +102,15 @@ class AStar(object):
             current = path[-1]
         return list(reversed(path))
 
+    def calculate_path_lenth(self):
+        path_length = 0
+        path = self.path
+        for i in range(len(path) - 1):
+            dist = self.distance(path[i], path[i + 1])
+            path_length = path_length + dist
+
+        return path_length
+
     # Plots the path found in self.path and the obstacles
     # INPUT: None
     # OUTPUT: None

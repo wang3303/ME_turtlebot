@@ -6,15 +6,17 @@ from std_msgs.msg import Float32MultiArray, String, Bool
 from geometry_msgs.msg import Twist, PoseArray, Pose2D, PoseStamped
 from asl_turtlebot.msg import DetectedObject
 import tf, tf.transformations
+from nav_msgs.msg import OccupancyGrid, MapMetaData, Path
 import math
 from enum import Enum
 from visualization_msgs.msg import Marker
 from geometry_msgs.msg import Quaternion, Pose, Point, Vector3
 from std_msgs.msg import Header, ColorRGBA
+from grids import StochOccupancyGrid2D
 
 # threshold at which we consider the robot at a location
-POS_EPS = .1
-THETA_EPS = .3
+POS_EPS = .3
+THETA_EPS = .4
 
 # time to stop at a stop sign
 STOP_SIGN_STOP_TIME = 3
@@ -40,10 +42,10 @@ WAIT_FOR_ORIGIN_TIME = 5
 # time taken to cross a detected vendor
 VENDOR_CROSSING_TIME = 6
 
-FOOD_LIST = ['pizza', 'cake', 'apple', 'banana']
+FOOD_LIST = ['pizza', 'cake', 'apple']
 
 # nubmer of vendors to visit
-NUM_VENDORS_TO_VISIT = len(FOOD_LIST) - 2
+NUM_VENDORS_TO_VISIT = len(FOOD_LIST) - 1
 
 
 # state machine modes, not all implemented
@@ -88,7 +90,9 @@ class Supervisor:
 		self.theta_g = 0
 
 		# current mode
+		# TODO: remember to change back
 		self.mode = Mode.WAIT_FOR_ORIGIN
+		# self.mode = Mode.WAIT_FOR_ORDER
 		self.last_mode_printed = None
 		self.originWaitTime_start = rospy.get_rostime()
 
@@ -106,9 +110,9 @@ class Supervisor:
 		self.request_sub = rospy.Subscriber('/delivery_request', String, self.request_cb)
 
 		# initializes the first goal as the origin of mag (where the bot first )
-		self.goal_list = []
 		self.goal_name = []
-		self.food_to_get = ["apple"]
+		self.goal_list = []
+		self.food_to_get = []
 
 		self.phaseI = True
 
@@ -117,7 +121,43 @@ class Supervisor:
 			rospy.Subscriber('/detector/' + food, DetectedObject, self.vendor_detected_callback)
 
 		self.trans_listener = tf.TransformListener()
+		# -------------------------------------------------------------
+		# to calculate best sequence of visiting
+		# map parameters
+		self.map_width = 0
+		self.map_height = 0
+		self.map_resolution = 0
+		self.map_origin = [0, 0]
+		self.map_probs = []
+		self.occupancy = None
+		self.occupancy_updated = False
+		# plan parameters
+		self.plan_resolution = 0.04
+		self.plan_horizon = 15
+		# subscriber to map information
+		rospy.Subscriber('/map', OccupancyGrid, self.map_callback)
+		rospy.Subscriber('/map_metadata', MapMetaData, self.map_md_callback)
+		# -------------------------------------------------------------
+	# -------------------------------------------------------------
+	def map_md_callback(self, msg):
+		self.map_width = msg.width
+		self.map_height = msg.height
+		self.map_resolution = msg.resolution
+		self.map_origin = (msg.origin.position.x, msg.origin.position.y)
 
+	def map_callback(self, msg):
+		self.map_probs = msg.data
+		if self.map_width > 0 and self.map_height > 0 and len(self.map_probs) > 0:
+			self.occupancy = StochOccupancyGrid2D(self.map_resolution,
+			                                      self.map_width,
+			                                      self.map_height,
+			                                      self.map_origin[0],
+			                                      self.map_origin[1],
+			                                      8,
+			                                      self.map_probs)
+			self.occupancy_updated = True
+
+	# -------------------------------------------------------------
 	def rviz_turtlebot_state(self):
 		origin_frame = "/map"
 		marker = Marker(
@@ -135,8 +175,6 @@ class Supervisor:
 		rospy.loginfo('Receiving request!')
 		self.food_to_get = msg.data.split(',')
 		self.phaseI = False
-		goal, name = self.construct_goal_lists()
-		self.goal_list, self.goal_name = goal, name
 
 	def pickup_callback(self, msg):
 		if self.mode == Mode.WAIT_FOR_ORDER:
@@ -171,6 +209,7 @@ class Supervisor:
 		if boxArea > STOP_MIN_DIST and (self.mode == Mode.NAV):
 			self.init_stop_sign()
 
+	# -------------------------------------------------------------
 	def construct_goal_lists(self, ):
 		# name, goal = self.goal_name, self.goal_list
 		# for i in range(len())
@@ -180,14 +219,86 @@ class Supervisor:
 		# TODO: modify the goal list after receiving the request
 		name = []
 		goal = []
-		# self.food_to_get=["apple"]
-		for i in range(len(self.food_to_get)):
-			food = self.food_to_get[i]
-			idx = self.goal_name.index(food)
-			name.append(food)  # name
-			goal.append(self.goal_list[idx])  # location
+		for i in range(len(self.goal_name)):
+			if self.goal_name[i] in self.food_to_get:
+				name.append(self.goal_name[i])
+				goal.append(self.goal_list[i])
 
-		return name, goal
+		self.goal_list, self.goal_name = goal, name
+
+		rospy.loginfo("construct_goal_lists: goal_name: {} goal_list: {}".format(self.goal_name, self.goal_list))
+
+		dic = self.construc_dic()
+		sorted_name = self.get_visit_sequence('start_point', self.goal_name, dic)
+		sorted_goal = []
+		for n in sorted_name:
+			for i in range(len(name)):
+				if name[i] == n:
+					sorted_goal.append(goal[i])
+
+		# append start point to the end of the list
+		sorted_goal.append((self.x, self.y, self.theta))
+		sorted_name.append('start_point')
+		rospy.loginfo("construct_goal_lists: sorted_goal: {} sorted_name: {}".format(sorted_goal, sorted_name))
+		return sorted_goal, sorted_name
+	# -------------------------------------------------------------
+	def snap_to_grid(self, x):
+		return (self.plan_resolution * round(x[0] / self.plan_resolution),
+		        self.plan_resolution * round(x[1] / self.plan_resolution))
+
+	# construc_dic() will return a dictionary. Ex. {('start_point','Apple'):15.00, ('start_point','Banana'):15.00}
+	def construc_dic(self, ):
+		from astar import AStar
+		name = ['start_point']
+		goal = [(self.x, self.y, self.theta)]
+		name += self.goal_name
+		goal += self.goal_list
+
+		dic = {}
+
+		state_min = self.snap_to_grid((-self.plan_horizon, -self.plan_horizon))  # not sure what is plan.hozizon
+		state_max = self.snap_to_grid((self.plan_horizon, self.plan_horizon))  # not sure what is plan.hozizon
+		rospy.loginfo("Start construction dic")
+		for i in range(len(name) - 1):
+			for j in range(i + 1, len(name)):
+				x_init = self.snap_to_grid((goal[i][0], goal[i][1]))
+				x_goal = self.snap_to_grid((goal[j][0], goal[j][1]))
+				problem = AStar(state_min, state_max, x_init, x_goal, self.occupancy, self.plan_resolution)
+				if not problem.solve():
+					return False
+				# add into dictionary
+				dic[(name[i], name[j])] = problem.calculate_path_lenth()
+				dic[(name[j], name[i])] = dic[(name[i], name[j])]
+
+		rospy.loginfo("construc_dic: dic: {}".format(dic))
+		rospy.loginfo("dic size {}".format(len(dic)))
+		return dic
+
+
+	def get_visit_sequence(self, init, request_list, distances):
+		"""
+		:param init: the name of origin point
+		:param request_list: the names of the points to visit
+		:param distances: a dictionary consisting of (point1, point2): distance(point1, point2)
+		:return: the list of sequence of name to visit
+		"""
+
+		def helper(visited, unvisited_num, length):
+			if unvisited_num == 0:
+				length += distances[(visited[-1], init)]
+				return length, visited[1:]
+			min_len = float('inf')
+			sequence = None
+			for pos in request_list:
+				if pos not in visited:
+					res = helper(visited + [pos], unvisited_num - 1, length + distances[(visited[-1], pos)])
+					if res[0] < min_len:
+						min_len = res[0]
+						sequence = res[1]
+			return min_len, sequence
+
+		return helper([init], len(request_list), 0)[1]
+	# -------------------------------------------------------------
 
 	def vendor_detected_callback(self, msg):
 		""" callback for when the detector has found an vendor. Note that
@@ -210,6 +321,7 @@ class Supervisor:
 		if boxArea > VENDOR_MIN_DIST and self.mode == Mode.EXP:
 			self.goal_list.append((self.x, self.y, self.theta))
 			self.goal_name.append(msg.name)
+			rospy.loginfo("vendor_detected_callback: {}".format(msg.name))
 			rospy.loginfo("vendor_detected_callback: VENDOR LIST: {}".format(self.goal_list))
 			self.init_vendor_cross()
 
@@ -385,7 +497,7 @@ class Supervisor:
 				self.goal_list.append(self.origin_loc)
 				self.goal_name.append('origin')
 				rospy.loginfo("START EXPLORING THE TOWN")
-			elif len(self.goal_list) == NUM_VENDORS_TO_VISIT + 1:
+			elif len(self.goal_list) >= NUM_VENDORS_TO_VISIT + 1:
 				rospy.loginfo("ALL VENDORS LOCATED")
 				self.x_g = self.goal_list[0][0]
 				self.y_g = self.goal_list[0][1]
@@ -420,8 +532,21 @@ class Supervisor:
 				rospy.loginfo("WAITING FOR ORDERS...")
 				print(self.food_to_get)
 			else:
+				try:
+					goal, name = self.construct_goal_lists()
+				except:
+					rospy.loginfo("CANNOT CALCULATE PATH")
+					name = []
+					goal = []
+					for i in range(len(self.goal_name)):
+						if self.goal_name[i] in self.food_to_get:
+							name.append(self.goal_name[i])
+							goal.append(self.goal_list[i])
+					goal.append((self.x, self.y, self.theta))
+					name.append('start_point')
+				self.goal_list, self.goal_name = goal, name
 				self.wait_for_orders_publisher.publish(True)
-				self.phaseI = False
+				# self.phaseI = False
 		else:
 			raise Exception('This mode is not supported: %s'
 			                % str(self.mode))

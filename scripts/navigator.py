@@ -73,7 +73,8 @@ class Navigator:
         self.occupancy_updated = False
 
         # plan parameters
-        self.plan_resolution =  0.05
+        # TODO: changed from 0.05
+        self.plan_resolution = 0.04
         self.plan_horizon = 15
 
         # variables for the controller
