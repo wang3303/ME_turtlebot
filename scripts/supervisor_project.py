@@ -265,7 +265,7 @@ class Supervisor:
 				x_goal = self.snap_to_grid((goal[j][0], goal[j][1]))
 				problem = AStar(state_min, state_max, x_init, x_goal, self.occupancy, self.plan_resolution)
 				if not problem.solve():
-					return False
+					raise Exception("Cannot solve")
 				# add into dictionary
 				dic[(name[i], name[j])] = problem.calculate_path_lenth()
 				dic[(name[j], name[i])] = dic[(name[i], name[j])]

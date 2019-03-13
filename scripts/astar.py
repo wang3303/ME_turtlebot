@@ -26,6 +26,9 @@ class AStar(object):
 
         self.path = None        # the final path as a list of states
 
+        self.init_err = False  # true when x_init has no neighbors
+        self.goal_err = False  # true when x_goal has no neighbors
+
     # Checks if a give state is free, meaning it is inside the bounds of the map and
     # is not inside any obstacle
     # INPUT: (x)
@@ -138,6 +141,14 @@ class AStar(object):
     # INPUT: None
     # OUTPUT: Boolean, True if a solution from x_init to x_goal was found
     def solve(self):
+        # check for end point errors
+        if not self.get_neighbors(self.x_init):
+            self.init_err = True
+            return False
+        elif not self.get_neighbors(self.x_goal):
+            self.goal_err = True
+            return False
+
         while len(self.open_set) > 0:
             cur = self.find_best_f_score()
             if cur == self.x_goal:
