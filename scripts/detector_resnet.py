@@ -7,7 +7,7 @@ from tf import TransformListener
 import tensorflow as tf
 import numpy as np
 from sensor_msgs.msg import CompressedImage, Image, CameraInfo, LaserScan
-from me_turtlebot.msg import DetectedObject, DetectedObjectList
+from asl_turtlebot.msg import DetectedObject, DetectedObjectList
 from cv_bridge import CvBridge, CvBridgeError
 import cv2
 import math
@@ -15,6 +15,16 @@ import math
 # path to the trained conv net
 PATH_TO_MODEL = os.path.join(os.path.dirname(os.path.realpath(__file__)), '../tfmodels/ssd_resnet_50_fpn_coco.pb')
 PATH_TO_LABELS = os.path.join(os.path.dirname(os.path.realpath(__file__)), '../tfmodels/coco_labels.txt')
+
+CLASSES = {
+    0: 1,  # unlabeled
+    12: 1,  # street sign
+    13: 1,  # stop sign
+}
+
+CLASSES.update({
+    i: 1 for i in range(44, 62)  # bottle - cake
+})
 
 # set to True to use tensorflow and a conv net
 # False will use a very simple color thresholding to detect stop signs only
@@ -24,7 +34,6 @@ MIN_SCORE = .5
 
 def load_object_labels(filename):
     """ loads the coco object readable name """
-
     fo = open(filename,'r')
     lines = fo.readlines()
     fo.close()
@@ -60,7 +69,6 @@ class Detector:
                 config = tf.ConfigProto()
                 config.gpu_options.allow_growth = True
             self.sess = tf.Session(graph=self.detection_graph, config=config)
-            # self.sess = tf.Session(graph=self.detection_graph)
 
         # camera and laser parameters that get updated
         self.cx = 0.
@@ -119,20 +127,23 @@ class Detector:
 
     def filter(self, boxes, scores, classes, num):
         """ removes any detected object below MIN_SCORE confidence """
-
-        f_scores, f_boxes, f_classes = [], [], []
-        f_num = 0
-
+        boxes_r, scores_r, classes_r = [], [], []  # Reweighted objects
+        sum_weight = 0.0
         for i in range(num):
-            if scores[i] >= MIN_SCORE:
-                f_scores.append(scores[i])
-                f_boxes.append(boxes[i])
-                f_classes.append(int(classes[i]))
-                f_num += 1
-            else:
-                break
-
-        return f_boxes, f_scores, f_classes, f_num
+            idx = int(classes[i])
+            if idx in CLASSES:
+                boxes_r.append(boxes[i])
+                scores_r.append(scores[i] * CLASSES[idx])
+                classes_r.append(classes[i])
+                sum_weight += scores[i] * CLASSES[idx]
+        boxes_f, scores_f, classes_f = [], [], []
+        for j in range(len(boxes_r)):
+            score = scores_r[j] / sum_weight
+            if score >= MIN_SCORE:
+                scores_f.append(score)
+                boxes_f.append(boxes_r[j])
+                classes_f.append(classes_r[j])
+        return boxes_f, scores_f, classes_f, len(boxes_f)
 
     def load_image_into_numpy_array(self, img):
         """ converts opencv image into a numpy array """

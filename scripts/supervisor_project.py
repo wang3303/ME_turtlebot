@@ -3,7 +3,7 @@
 import rospy
 # from gazebo_msgs.msg import ModelStates
 from std_msgs.msg import Float32MultiArray, String, Bool
-from geometry_msgs.msg import Twist, PoseArray, Pose2D, PoseStamped
+from geometry_msgs.msg import Twist, PoseArray, Pose2D, PoseStamped,PoseWithCovarianceStamped
 from asl_turtlebot.msg import DetectedObject
 import tf, tf.transformations
 from nav_msgs.msg import OccupancyGrid, MapMetaData, Path
@@ -16,7 +16,7 @@ from grids import StochOccupancyGrid2D
 
 # threshold at which we consider the robot at a location
 POS_EPS = .3
-THETA_EPS = .4
+THETA_EPS = 1
 
 # time to stop at a stop sign
 STOP_SIGN_STOP_TIME = 3
@@ -42,11 +42,18 @@ WAIT_FOR_ORIGIN_TIME = 5
 # time taken to cross a detected vendor
 VENDOR_CROSSING_TIME = 6
 
-FOOD_LIST = ['pizza', 'cake', 'apple']
-
-# nubmer of vendors to visit
-NUM_VENDORS_TO_VISIT = len(FOOD_LIST) - 1
-
+FOOD_LIST = [
+	"banana",
+	"apple",
+	"sandwich",
+	"orange",
+	"broccoli",
+	"carrot",
+	"pizza",
+	"donut",
+	"cake",
+	"bottle",
+]
 
 # state machine modes, not all implemented
 class Mode(Enum):
@@ -90,9 +97,7 @@ class Supervisor:
 		self.theta_g = 0
 
 		# current mode
-		# TODO: remember to change back
 		self.mode = Mode.WAIT_FOR_ORIGIN
-		# self.mode = Mode.WAIT_FOR_ORDER
 		self.last_mode_printed = None
 		self.originWaitTime_start = rospy.get_rostime()
 
@@ -106,6 +111,7 @@ class Supervisor:
 		rospy.Subscriber('/detector/stop_sign', DetectedObject, self.stop_sign_detected_callback)
 		rospy.Subscriber('/ready_to_pickup', Bool, self.pickup_callback)
 		rospy.Subscriber('/move_base_simple/goal', PoseStamped, self.rviz_goal_callback)
+		rospy.Subscriber('/initialpose', PoseWithCovarianceStamped, self.switch_callback)
 
 		self.request_sub = rospy.Subscriber('/delivery_request', String, self.request_cb)
 
@@ -115,6 +121,7 @@ class Supervisor:
 		self.food_to_get = []
 
 		self.phaseI = True
+		self.lastVendorDetected = False
 
 		# set up object detector
 		for food in FOOD_LIST:
@@ -176,6 +183,10 @@ class Supervisor:
 		self.food_to_get = msg.data.split(',')
 		self.phaseI = False
 
+	def switch_callback(self, msg):
+		rospy.loginfo('Exploration Complete')
+		self.lastVendorDetected = True
+
 	def pickup_callback(self, msg):
 		if self.mode == Mode.WAIT_FOR_ORDER:
 			if msg.data:
@@ -190,9 +201,6 @@ class Supervisor:
 		euler = tf.transformations.euler_from_quaternion(rotation)
 		self.theta_g = euler[2]
 
-	# TODO
-	# self.mode = Mode.NAV
-
 	def stop_sign_detected_callback(self, msg):
 		""" callback for when the detector has found a stop sign. Note that
 		a distance of 0 can mean that the lidar did not pickup the stop sign at all """
@@ -206,17 +214,11 @@ class Supervisor:
 		rospy.loginfo("STOP SIGN AREA: %f", boxArea)
 
 		# if close enough and in nav mode, stop
-		if boxArea > STOP_MIN_DIST and (self.mode == Mode.NAV):
+		if boxArea > STOP_MIN_DIST and ((self.mode == Mode.NAV) or (self.mode == Mode.EXP)):
 			self.init_stop_sign()
 
 	# -------------------------------------------------------------
 	def construct_goal_lists(self, ):
-		# name, goal = self.goal_name, self.goal_list
-		# for i in range(len())
-		#     idx =
-		#     name.append(self.goal_list[idx])
-		#     goal.append(self.goal_name[idx])
-		# TODO: modify the goal list after receiving the request
 		name = []
 		goal = []
 		for i in range(len(self.goal_name)):
@@ -246,7 +248,8 @@ class Supervisor:
 		return (self.plan_resolution * round(x[0] / self.plan_resolution),
 		        self.plan_resolution * round(x[1] / self.plan_resolution))
 
-	# construc_dic() will return a dictionary. Ex. {('start_point','Apple'):15.00, ('start_point','Banana'):15.00}
+	# construc_dic() will return a dictionary.
+	# Ex. {('start_point','Apple'):15.00, ('start_point','Banana'):15.00}
 	def construc_dic(self, ):
 		from astar import AStar
 		name = ['start_point']
@@ -318,7 +321,7 @@ class Supervisor:
 		rospy.loginfo("Predicted dist: %f", dist)
 
 		# if close enough and in nav mode, stop
-		if boxArea > VENDOR_MIN_DIST and self.mode == Mode.EXP:
+		if boxArea > VENDOR_MIN_DIST and self.mode == Mode.EXP and (msg.name not in self.goal_name):
 			self.goal_list.append((self.x, self.y, self.theta))
 			self.goal_name.append(msg.name)
 			rospy.loginfo("vendor_detected_callback: {}".format(msg.name))
@@ -357,8 +360,8 @@ class Supervisor:
 
 	def stay_idle(self):
 		""" sends zero velocity to stay put """
-
 		vel_g_msg = Twist()
+		# rospy.loginfo("cmd_vel_publisher: {}".format(vel_g_msg))
 		self.cmd_vel_publisher.publish(vel_g_msg)
 
 	def close_to(self, x, y, theta):
@@ -497,7 +500,7 @@ class Supervisor:
 				self.goal_list.append(self.origin_loc)
 				self.goal_name.append('origin')
 				rospy.loginfo("START EXPLORING THE TOWN")
-			elif len(self.goal_list) >= NUM_VENDORS_TO_VISIT + 1:
+			elif self.lastVendorDetected:
 				rospy.loginfo("ALL VENDORS LOCATED")
 				self.x_g = self.goal_list[0][0]
 				self.y_g = self.goal_list[0][1]
@@ -511,16 +514,9 @@ class Supervisor:
 				self.nav_to_pose()
 
 		elif self.mode == Mode.ADD_GAS:
-			if self.close_to(self.x_g, self.y_g, self.theta_g):
+			if self.close_to(self.x_g, self.y_g, self.theta_g) or not self.phaseI:
 				rospy.loginfo('Mode.ADD_GAS: Arrive at home!')
-				# self.x_g = self.goal_list[0][0]
-				# self.y_g = self.goal_list[0][1]
-				# self.theta_g = self.goal_list[0][2]
-				# del self.goal_list[0]
-				# del self.goal_name[0]
 				rospy.loginfo('Mode.ADD_GAS -> WAIT_FOR_ORDER')
-				# print(self.goal_name)
-				# rospy.loginfo('111111111111111111111111111111111111111111111')
 				self.mode = Mode.WAIT_FOR_ORDER
 			else:
 				rospy.loginfo('Mode.ADD_GAS: On the way back to home!')

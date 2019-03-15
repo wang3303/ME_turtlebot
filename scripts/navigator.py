@@ -2,7 +2,7 @@
 
 import rospy
 from nav_msgs.msg import OccupancyGrid, MapMetaData, Path
-from gazebo_msgs.msg import ModelStates
+# from gazebo_msgs.msg import ModelStates
 from geometry_msgs.msg import Twist, PoseArray, Pose2D, PoseStamped
 from std_msgs.msg import Float32MultiArray, String
 import tf
@@ -24,7 +24,7 @@ END_POS_THRESH = .2
 START_POS_THRESH = .2
 
 # thereshold in theta to start moving forward when path following
-THETA_START_THRESH = 0.09
+THETA_START_THRESH = np.pi * (10 / 180.0)
 # P gain on orientation before start
 THETA_START_P = 1
 
@@ -32,16 +32,18 @@ THETA_START_P = 1
 V_MAX = .2
 
 # maximim angular velocity
-W_MAX = .4
+W_MAX = .2
 
 # desired crusing velocity
 V_DES = 0.12
 
 # gains of the path follower
-KPX = .5
-KPY = .5
-KDX = 1.5
-KDY = 1.5
+KPX = 1
+KPY = 1
+KDX = 1
+# KDX = 1.5
+KDY = 1
+# KDY = 1.5
 
 # smoothing condition (see splrep documentation)
 SMOOTH = .01
@@ -73,8 +75,7 @@ class Navigator:
         self.occupancy_updated = False
 
         # plan parameters
-        # TODO: changed from 0.05
-        self.plan_resolution = 0.04
+        self.plan_resolution = 0.05
         self.plan_horizon = 15
 
         # variables for the controller
@@ -119,6 +120,9 @@ class Navigator:
     def close_to_end_location(self):
         return (abs(self.x-self.x_g)<END_POS_THRESH and abs(self.y-self.y_g)<END_POS_THRESH)
 
+    def super_close_to_end_location(self):
+        return ((self.x-self.x_g)**2 + (self.y-self.y_g)**2) < 0.01
+
     def snap_to_grid(self, x):
         return (self.plan_resolution*round(x[0]/self.plan_resolution), self.plan_resolution*round(x[1]/self.plan_resolution))
 
@@ -146,6 +150,13 @@ class Navigator:
         # makes sure we have a map
         if not self.occupancy:
             self.current_plan = []
+            return
+
+        if self.super_close_to_end_location():
+            cmd = Twist()
+            cmd.linear.x = 0
+            cmd.angular.z = 0
+            self.nav_vel_pub.publish(cmd)
             return
 
         # if close to the goal, use the pose_controller instead
@@ -227,11 +238,17 @@ class Navigator:
             if self.V_prev == 0:
                 theta_init = np.arctan2(self.current_plan[1][1]-self.current_plan[0][1],self.current_plan[1][0]-self.current_plan[0][0])
                 theta_err = theta_init-self.theta
-                if abs(theta_err)>THETA_START_THRESH:
-                    cmd_msg = Twist()
-                    cmd_msg.linear.x = 0
-                    cmd_msg.angular.z = THETA_START_P * theta_err
-                    self.nav_vel_pub.publish(cmd_msg)
+                if abs(theta_err) > THETA_START_THRESH:
+                    pose_g_msg = Pose2D()
+                    pose_g_msg.x = self.x_g
+                    pose_g_msg.y = self.y_g
+                    pose_g_msg.theta = self.theta_g
+                    self.nav_pose_pub.publish(pose_g_msg)
+                    # cmd_msg = Twist()
+                    # cmd_msg.linear.x = 0
+                    # cmd_msg.angular.z = THETA_START_P * theta_err
+                    # rospy.loginfo("navigator1: {}".format(cmd_msg))
+                    # self.nav_vel_pub.publish(cmd_msg)
                     return
 
             # compute the "current" time along the path execution
@@ -301,6 +318,7 @@ class Navigator:
         cmd_msg = Twist()
         cmd_msg.linear.x = cmd_x_dot
         cmd_msg.angular.z = cmd_theta_dot
+        rospy.loginfo("navigator2: {}".format(cmd_msg))
         self.nav_vel_pub.publish(cmd_msg)
 
 

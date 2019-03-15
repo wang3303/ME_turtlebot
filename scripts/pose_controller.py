@@ -1,28 +1,26 @@
 #!/usr/bin/env python
 
 import rospy
-from gazebo_msgs.msg import ModelStates
 from geometry_msgs.msg import Twist, PoseArray, Pose2D
-from std_msgs.msg import Float32MultiArray, String
-import tf
+import tf, tf.transformations
 import numpy as np
 from numpy import linalg
-from utils import wrapToPi
+from utils import wrapToPi, wrapTo2Pi
+from enum import Enum
 
-# control gains
-K1 = 0.4
-K2 = 0.8
-K3 = 0.8
+# gains
+Kv = 0.5
+Kw = 0.5
 
-# tells the robot to stay still
-# if it doesn't get messages within that time period
 TIMEOUT = np.inf
 
-# maximum velocity
-V_MAX = 0.2
+V_MAX = 0.1
 
 # maximim angular velocity
-W_MAX = 1
+W_MAX = 0.5
+
+DIST_THRES = 0.06
+YAW_THRES = np.pi * (10 / 180.0)
 
 # if sim is True/using gazebo, therefore want to subscribe to /gazebo/model_states\
 # otherwise, they will use a TF lookup (hw2+)
@@ -32,142 +30,146 @@ use_gazebo = rospy.get_param("sim")
 mapping = rospy.get_param("map")
 
 
-print "pose_controller settings:\n"
-print "use_gazebo = %s\n" % use_gazebo
-print "mapping = %s\n" % mapping
+class ControllerState(Enum):
+	IDLE = 1
+	FWD = 2
+	FIX_YAW = 3
+
 
 class PoseController:
+	def __init__(self):
+		rospy.init_node('turtlebot_pose_controller_nav', log_level=rospy.INFO, anonymous=True)
+		self.pub = rospy.Publisher('/cmd_vel', Twist, queue_size=10)
 
-    def __init__(self):
-        rospy.init_node('turtlebot_pose_controller', anonymous=True)
-        self.pub = rospy.Publisher('/cmd_vel', Twist, queue_size=10)
+		self.x = 0.0
+		self.y = 0.0
+		self.theta = 0.0
+		self.x_g = None
+		self.y_g = None
+		self.theta_g = None
+		self.state = ControllerState.IDLE
+		# time last pose command was received
+		self.cmd_pose_time = rospy.get_rostime()
+		self.trans_listener = tf.TransformListener()
 
-        # current state
-        self.x = 0.0
-        self.y = 0.0
-        self.theta = 0.0
+		rospy.Subscriber('/cmd_pose', Pose2D, self.cmd_pose_callback)
 
-        # goal state
-        self.x_g = None
-        self.y_g = None
-        self.theta_g = None        
+	def update_state(self, state):
+		if state != self.state:
+			rospy.loginfo("PoseController: State changed to {}".format(state))
+			self.state = state
 
-        # time last pose command was received
-        self.cmd_pose_time = rospy.get_rostime()
-        # if using gazebo, then subscribe to model states
-        if use_gazebo:
-            rospy.Subscriber('/gazebo/model_states', ModelStates, self.gazebo_callback)
- 
-        self.trans_listener = tf.TransformListener()
+	def cmd_pose_callback(self, data):
+		rospy.logdebug("in cmd pose callback")
+		if data.x == self.x_g and data.y == self.y_g:
+			return
 
+		self.x_g = data.x
+		self.y_g = data.y
+		self.theta_g = data.theta
 
-        ######### YOUR CODE HERE ############
-        # create a subscriber that receives Pose2D messages and
-        # calls cmd_pose_callback. It should subscribe to '/cmd_pose'
+		self.cmd_pose_time = rospy.get_rostime()
+		rospy.loginfo("PoseController: Got new goal x:{} y:{}, theta:{}".format(self.x_g, self.y_g, self.theta_g))
+		# start moving, always turn first
+		self.update_state(ControllerState.FWD)
 
-        rospy.Subscriber('/cmd_pose', Pose2D, self.cmd_pose_callback)
+	def update_current_pose(self):
+		if not use_gazebo:
+			try:
+				origin_frame = "/map" if mapping else "/odom"
+				(translation, rotation) = self.trans_listener.lookupTransform(origin_frame, '/base_footprint',
+				                                                              rospy.Time(0))
+				self.x = translation[0]
+				self.y = translation[1]
+				euler = tf.transformations.euler_from_quaternion(rotation)
+				self.theta = euler[2]
+			except (tf.LookupException, tf.ConnectivityException, tf.ExtrapolationException):
+				pass
 
-        ######### END OF YOUR CODE ##########
+	def get_ctrl_output_fwd(self):
+		if (rospy.get_rostime().to_sec() - self.cmd_pose_time.to_sec()) < TIMEOUT:
+			rel_coords = np.array([self.x - self.x_g, self.y - self.y_g])
+			R = np.array([[np.cos(self.theta_g), np.sin(self.theta_g)], [-np.sin(self.theta_g), np.cos(self.theta_g)]])
+			rho = linalg.norm(rel_coords)
+			th_rot = wrapToPi(wrapTo2Pi(self.get_direction(self.x_g, self.y_g) - wrapTo2Pi(self.theta)))
 
-    def gazebo_callback(self, data):
-        if "turtlebot3_burger" in data.name:
-            pose = data.pose[data.name.index("turtlebot3_burger")]
-            twist = data.twist[data.name.index("turtlebot3_burger")]
-            self.x = pose.position.x
-            self.y = pose.position.y
-            quaternion = (
-                pose.orientation.x,
-                pose.orientation.y,
-                pose.orientation.z,
-                pose.orientation.w)
-            euler = tf.transformations.euler_from_quaternion(quaternion)
-            self.theta = euler[2]
+			if np.abs(th_rot) < YAW_THRES:
+				V = Kv * rho
+				om = 0
+			else:
+				V = 0
+				om = Kw * th_rot
+			cmd_x_dot = np.sign(V) * min(V_MAX, np.abs(V))
+			cmd_theta_dot = np.sign(om) * min(W_MAX, np.abs(om))
+		else:
+			cmd_x_dot = 0
+			cmd_theta_dot = 0
 
-    def cmd_pose_callback(self, data):
-        ######### YOUR CODE HERE ############
-        # fill out cmd_pose_callback
-        self.x_g = data.x
-        self.y_g = data.y
-        self.theta_g = data.theta
-        ######### END OF YOUR CODE ##########
-        self.cmd_pose_time = rospy.get_rostime()
+		cmd = Twist()
+		cmd.linear.x = cmd_x_dot
+		cmd.angular.z = cmd_theta_dot
+		return cmd
 
+	def get_direction(self, x, y):
+		return np.arctan2(y - self.y, x - self.x)
 
-    def get_ctrl_output(self):
-        if self.x_g is None:
-            return None
+	def get_ctrl_output_fix_yaw(self, theta_target):
+		cmd_x_dot = 0
+		cmd_theta_dot = 0
 
-        """ runs a simple feedback pose controller """
-        if (rospy.get_rostime().to_sec()-self.cmd_pose_time.to_sec()) < TIMEOUT:
-            # if you are not using gazebo, your need to use a TF look-up to find robot's states
-            # relevant for hw 3+
-            if not use_gazebo:
-                try:
-                    origin_frame = "/map" if mapping else "/odom"
-                    (translation,rotation) = self.trans_listener.lookupTransform(origin_frame, '/base_footprint', rospy.Time(0))
-                    self.x = translation[0]
-                    self.y = translation[1]
-                    euler = tf.transformations.euler_from_quaternion(rotation)
-                    self.theta = euler[2]
-                except (tf.LookupException, tf.ConnectivityException, tf.ExtrapolationException):
-                    pass
+		if (rospy.get_rostime().to_sec() - self.cmd_pose_time.to_sec()) < TIMEOUT:
+			err_yaw = wrapToPi(wrapTo2Pi(theta_target) - wrapTo2Pi(self.theta))
+			if np.abs(err_yaw) > YAW_THRES:
+				rospy.logdebug("yaw error: {}".format(err_yaw))
+				cmd_theta_dot = Kw * err_yaw
 
-            ######### YOUR CODE HERE ############
-            # robot's state is self.x, self.y, self.theta
-            # robot's desired state is self.x_g, self.y_g, self.theta_g
-            # fill out cmd_x_dot = ... cmd_theta_dot = ...
+		else:
+			cmd_x_dot = 0
+			cmd_theta_dot = 0
+			err_yaw = 0
 
-            rel_coords = np.array([self.x-self.x_g, self.y-self.y_g])
-            R = np.array([[np.cos(self.theta_g), np.sin(self.theta_g)], [-np.sin(self.theta_g), np.cos(self.theta_g)]])
-            rel_coords_rot = np.dot(R,rel_coords)
+		cmd = Twist()
+		cmd.linear.x = cmd_x_dot
+		cmd.angular.z = cmd_theta_dot
+		return cmd, err_yaw
 
-            th_rot = self.theta-self.theta_g 
-            rho = linalg.norm(rel_coords) 
+	def close_to_goal(self):
+		self.update_current_pose()
+		rel_coords = np.array([self.x - self.x_g, self.y - self.y_g])
+		rho = linalg.norm(rel_coords)
+		return rho < DIST_THRES
 
-            if (rho < 0.1) & (th_rot < 0.15):
-                rospy.loginfo("Close to goal: commanding zero controls")
-                self.x_g = None
-                self.y_g = None
-                self.theta_g = None
-                cmd_x_dot = 0
-                cmd_theta_dot = 0
-            else:
-                ang = np.arctan2(rel_coords_rot[1],rel_coords_rot[0])+np.pi 
-                angs = wrapToPi(np.array([ang-th_rot, ang])) 
-                alpha = angs[0] 
-                delta = angs[1] 
+	def get_ctrl_output_idle(self):
+		cmd = Twist()
+		cmd.linear.x = 0
+		cmd.angular.z = 0
+		return cmd
 
-                V = K1*rho*np.cos(alpha) 
-                om = K2*alpha + K1*np.sinc(2*alpha/np.pi)*(alpha+K3*delta) 
+	def run(self):
+		rate = rospy.Rate(10)  # 10 Hz
+		while not rospy.is_shutdown():
+			if self.x_g is None:
+				self.update_state(ControllerState.IDLE)
+			# State machine for pose controller
+			if self.state == ControllerState.IDLE:
+				ctrl_output = self.get_ctrl_output_idle()
+			elif self.state == ControllerState.FWD:
+				self.update_current_pose()
+				ctrl_output = self.get_ctrl_output_fwd()
+				if self.close_to_goal():
+					self.update_state(ControllerState.FIX_YAW)
+			elif self.state == ControllerState.FIX_YAW:
+				self.update_current_pose()
+				ctrl_output, err_yaw = self.get_ctrl_output_fix_yaw(self.theta_g)
+				if abs(err_yaw) < YAW_THRES:
+					self.update_state(ControllerState.IDLE)
 
-                # Apply saturation limits
-                cmd_x_dot = np.sign(V)*min(V_MAX, np.abs(V))
-                cmd_theta_dot = np.sign(om)*min(W_MAX, np.abs(om))
+			if self.state is not ControllerState.IDLE:
+				rospy.loginfo('close_to_goal Publish from pose_controller: {}, state:{}'.format(ctrl_output, self.state))
+				self.pub.publish(ctrl_output)
+			rate.sleep()
 
-
-            ######### END OF YOUR CODE ##########
-
-        else:
-            # haven't received a command in a while so stop
-            rospy.loginfo("Pose controller TIMEOUT: commanding zero controls")
-            cmd_x_dot = 0
-            cmd_theta_dot = 0
-
-
-        cmd = Twist()
-        cmd.linear.x = cmd_x_dot
-        cmd.angular.z = cmd_theta_dot
-        return cmd
-
-    def run(self):
-        rate = rospy.Rate(10) # 10 Hz
-        while not rospy.is_shutdown():
-            ctrl_output = self.get_ctrl_output()
-            if ctrl_output is not None:
-                self.pub.publish(ctrl_output)
-            rate.sleep()
 
 if __name__ == '__main__':
-
-    pctrl = PoseController()
-    pctrl.run()
+	posecontrol = PoseController()
+	posecontrol.run()
